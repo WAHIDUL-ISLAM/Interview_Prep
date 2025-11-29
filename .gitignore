@@ -1,0 +1,86 @@
+# ===========================
+# NODE / NEXT.JS
+# ===========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Next.js build output
+.next/
+out/
+build/
+
+# Typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# ===========================
+# ENVIRONMENT FILES
+# ===========================
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.test
+
+# ===========================
+# MONOREPO / WORKSPACE FOLDERS
+# ===========================
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+.pnp
+.pnp.*
+
+# ===========================
+# PYTHON / FASTAPI BACKEND
+# ===========================
+
+# Virtual environments
+backend/.venv/
+.venv/
+venv/
+env/
+
+# Python caches (global)
+**/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Python tools caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.pyre/
+.dmypy.json
+coverage/
+
+# Lock files
+backend/.python-version
+
+# IDE / tooling
+backend/.idea/
+backend/.vscode/
+.idea/
+.vscode/
+
+# Backend cache
+backend/.cache/
+
+# ===========================
+# SYSTEM / MISC
+# ===========================
+.DS_Store
+*.pem
+*.log
+
+# Vercel deployment
+.vercel
