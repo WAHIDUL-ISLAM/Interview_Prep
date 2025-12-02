@@ -42,6 +42,17 @@ export default function Page() {
     fetchAllInterviews();
   }, []);
 
+  async function handleDelete(id: string) {
+    const ok = confirm("Are you sure you want to delete this interview?");
+    if (!ok) return;
+
+    await supabase.from("interviews").delete().eq("id", id);
+
+    // Refresh UI
+    setInterviews(prev => prev.filter(inter => inter.id !== id));
+  }
+
+
   return (
     <>
       {/* --- Hero Section --- */}
@@ -96,6 +107,7 @@ export default function Page() {
                 createdAt={interview.created_at}
                 totalScore={interview.totalScore}
                 finalAssessment={interview.finalAssessment}
+                onDelete={handleDelete}
               />
             ))}
           </div>

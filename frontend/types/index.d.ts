@@ -44,6 +44,7 @@ export interface Interview {
   userId: string;
   finalized: boolean;
   questions?: Question[];
+  creation_method: "MANUAL" | "pdf_upload";
 }
 
 // 🧑 User entity (matches Supabase `users` table)

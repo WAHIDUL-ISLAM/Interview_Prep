@@ -4,17 +4,19 @@ import { useState, useRef, useEffect } from "react";
 import Agent, { InterviewUIState } from "@/components/Agent";
 import AudioVisualizer from "./AudioVisualizer";
 import { Loader2 } from "lucide-react";
-
+import { Question } from "@/types";
+import { useRouter } from "next/navigation";
 
 
 
 interface InterviewRunnerProps {
     user?: { id?: string; name?: string | null };
     interviewId: string;
-    questions: question[];
+    questions: Question[];
+    attemptId?: string | null;
 }
 
-export default function InterviewRunner({ user, interviewId, questions }: InterviewRunnerProps) {
+export default function InterviewRunner({ user, interviewId, questions, attemptId }: InterviewRunnerProps) {
     // --- Existing State ---
     const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
     const [interviewStarted, setInterviewStarted] = useState(false);
@@ -22,16 +24,16 @@ export default function InterviewRunner({ user, interviewId, questions }: Interv
     const [isAudioPlaying, setIsAudioPlaying] = useState(false);
     const [uiTranscript, setUiTranscript] = useState("");
     const isLastQuestion = currentQuestionIndex === questions.length - 1;
-    const [attemptId, setAttemptId] = useState<string | null>(null);
+
 
     // --- NEW: Recording State ---
     const [isRecording, setIsRecording] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
 
     // --- NEW: Dual-Stream State ---
-    const [liveTranscript, setLiveTranscript] = useState(""); // Instant text from browser
-    const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null); // Playback URL
-    const [mediaStream, setMediaStream] = useState<MediaStream | null>(null); // For Visualizer
+    const [liveTranscript, setLiveTranscript] = useState("");
+    const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
+    const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
 
     // --- Refs ---
     const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -43,6 +45,12 @@ export default function InterviewRunner({ user, interviewId, questions }: Interv
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const recognitionRef = useRef<any>(null);
     const audioChunksRef = useRef<Blob[]>([]);
+
+    //--Scoring Ref--//
+    const [isFinalizing, setIsFinalizing] = useState(false);
+    const [finalResult, setFinalResult] = useState<any | null>(null);
+
+    const router = useRouter();
 
     useEffect(() => {
         currentIndexRef.current = currentQuestionIndex;
@@ -75,7 +83,6 @@ export default function InterviewRunner({ user, interviewId, questions }: Interv
     const [timeIsUp, setTimeIsUp] = useState(false);
     const showOverlayCondition = interviewStarted && currentQuestionIndex === 0;
 
-
     useEffect(() => {
         if (showOverlayCondition) {
             setTimeIsUp(false);
@@ -100,25 +107,21 @@ export default function InterviewRunner({ user, interviewId, questions }: Interv
 
     }, [loadingAudio, timeIsUp, currentQuestionIndex, questions, showOverlayCondition]);
 
-    function generateUniqueAttemptId() {
-
-        if (typeof window !== 'undefined' && window.crypto && window.crypto.randomUUID) {
-            return window.crypto.randomUUID();
-        }
-
-        console.warn("Using UUID fallback method. Please ensure modern browser support for production.");
-
-
-        return 'uuid-fallback-' + Date.now().toString(36) + Math.random().toString(36).substring(2, 9);
-    }
+    useEffect(() => {
+        // This function runs when the component unmounts or before recordedAudioUrl changes
+        return () => {
+            if (recordedAudioUrl) {
+                URL.revokeObjectURL(recordedAudioUrl);
+            }
+        };
+    }, [recordedAudioUrl]);
 
 
-
+    // ---Interview Start Logic ---
     async function startInterview() {
         if (!questions || questions.length === 0) return;
 
-        const newAttemptId = generateUniqueAttemptId();
-        setAttemptId(newAttemptId);
+        const newAttemptId = attemptId ?? "";
         setUiTranscript("Starting new interview session...");
 
         try {
@@ -165,32 +168,35 @@ export default function InterviewRunner({ user, interviewId, questions }: Interv
         if (isRecording) stopRecording();
 
         if (attemptId && interviewId) {
-            setUiTranscript("Finalizing interview and submitting results...");
+            setIsFinalizing(true);   // <-- SHOW LOADER
+            setUiTranscript("Analyzing your responses...");
+
             try {
                 const response = await fetch("http://localhost:8000/interview/complete_attempt", {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                        attemptId: attemptId,
-                        interviewId: interviewId,
+                        attemptId,
+                        interviewId,
                         userId: user?.id,
                     }),
                 });
 
-                if (!response.ok) {
-                    throw new Error(`Failed to complete attempt: ${response.status}`);
-                }
+                if (!response.ok) throw new Error(`Failed to complete attempt: ${response.status}`);
 
-                setUiTranscript("Interview successfully finalized. Redirecting to results...");
-            } catch (error) {
+                router.push(`/interview`);
+
+            } catch (error: any) {
                 console.error("Interview finalization failed:", error);
                 setUiTranscript(`ERROR finalizing interview: ${error.message}`);
+            } finally {
+
             }
         }
+
         setCurrentQuestionIndex(questions.length);
     }
+
     // ...
 
     async function fetchAudio(questionId: string) {
@@ -367,8 +373,29 @@ export default function InterviewRunner({ user, interviewId, questions }: Interv
 
     const shouldDisplayOverlay = showOverlayCondition && (loadingAudio || !timeIsUp);
     const hideQuestion = currentQuestionIndex === 0 && !timeIsUp;
+    if (isFinalizing) {
+        return (
+            <div className="fixed inset-0 bg-background/95 backdrop-blur-sm z-50 flex flex-col items-center justify-center p-6 animate-fadeIn">
+                <div className="p-10 rounded-2xl dark-gradient border border-primary-200/50 shadow-2xl max-w-xl w-full flex flex-col items-center text-center space-y-6">
 
+                    <Loader2 className="w-12 h-12 text-primary-200 animate-spin" />
 
+                    <h2 className="text-3xl font-bold text-success-100">
+                        Analyzing Your Interview…
+                    </h2>
+
+                    <p className="text-lg text-foreground/80 leading-relaxed">
+                        Please wait while we process your responses,
+                        evaluate your performance, and prepare your personalized feedback.
+                    </p>
+
+                    <div className="mt-4 text-sm text-primary-200 animate-pulse">
+                        This may take a few seconds…
+                    </div>
+                </div>
+            </div>
+        );
+    }
     return (
 
         <>
@@ -443,7 +470,7 @@ export default function InterviewRunner({ user, interviewId, questions }: Interv
                             </div>
                             <div className="mt-6 flex items-center gap-3 text-lg font-medium text-foreground">
                                 <Loader2 className="w-5 h-5 text-primary-200 animate-spin" />
-                                Preparing Audio for you (Please wait)
+                                Setting up the interview for you (Please wait)
                             </div>
                         </div>
                     </div>
