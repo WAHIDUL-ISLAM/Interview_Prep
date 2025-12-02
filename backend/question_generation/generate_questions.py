@@ -3,8 +3,30 @@ import json
 from datetime import datetime
 from llm_clients import llm_interviewer  
 import re
+from services.storage import get_previous_attempt_id
+from supabase_client import supabase
+import random
 
-def generate_questions(role: str, techstack: list[str], interview_type: str):
+def generate_questions(role: str, techstack: list[str], interview_type: str, user_id: str = None, interview_id: str = None):
+    
+    previous_attempt_id = get_previous_attempt_id(interview_id, user_id)
+    reused_questions = []
+
+    if previous_attempt_id:
+        # Fetch previous questions
+        prev_res = supabase.table("questions").select("*").eq("attempt_id", previous_attempt_id).execute()
+        prev_questions = prev_res.data if prev_res.data else []
+
+        if len(prev_questions) >= 2:
+            reused_questions = random.sample(prev_questions, 2)
+
+            # Assign new IDs
+            for q in reused_questions:
+                q["id"] = str(uuid.uuid4())
+
+    # --- STEP B: generate new LLM questions ---
+    number_of_new_questions = 10 - len(reused_questions)
+
     system_prompt = f"""
         You are a senior technical interviewer conducting a realistic, structured interview.
 
@@ -13,7 +35,7 @@ def generate_questions(role: str, techstack: list[str], interview_type: str):
         Interview type: {interview_type}
 
         🎯 Objectives:
-        1. Generate exactly 10 interview questions.
+        1. Generate exactly {number_of_new_questions} interview questions.
         2. Questions should simulate a real interview:
         - Start with basic concepts and gradually increase in difficulty.
         - Each question should logically follow from the previous one.
@@ -75,12 +97,14 @@ def generate_questions(role: str, techstack: list[str], interview_type: str):
                 "ideal_answer": q.get("ideal_answer", None),    
                 "key_points": q.get("key_points", []), 
             })
+            
+    final_questions = reused_questions + questions
 
-    return questions
+    return final_questions
 
 
 
-def generate_questions_from_pdf(chunks_data: list[dict], structured_data: list[dict]):
+def generate_questions_from_pdf(chunks_data: list[dict], structured_data: list[dict],user_id: str = None, interview_id: str = None):
     """
     Generates exactly 10 interview questions from PDF chunks and structured data.
     Always ensures 10 questions are returned, with placeholders if necessary.
@@ -98,6 +122,25 @@ def generate_questions_from_pdf(chunks_data: list[dict], structured_data: list[d
 
     topics_list = topics_list or ["general"]
     key_points_list = key_points_list or []
+    
+    previous_attempt_id = get_previous_attempt_id(interview_id, user_id)
+    reused_questions = []
+
+    if previous_attempt_id:
+        # Fetch previous questions
+        prev_res = supabase.table("questions").select("*").eq("attempt_id", previous_attempt_id).execute()
+        prev_questions = prev_res.data if prev_res.data else []
+
+        if len(prev_questions) >= 2:
+            reused_questions = random.sample(prev_questions, 2)
+
+            # Assign new IDs
+            for q in reused_questions:
+                q["id"] = str(uuid.uuid4())
+
+    # --- STEP B: generate new LLM questions ---
+    number_of_new_questions = 10 - len(reused_questions)
+    
 
     # System prompt with **example**
     system_prompt = f"""
@@ -108,7 +151,7 @@ def generate_questions_from_pdf(chunks_data: list[dict], structured_data: list[d
     Key points: {', '.join(key_points_list)}
 
     🎯 Objectives:
-    1. Generate exactly 10 interview questions, no more, no less.
+    1. Generate exactly {number_of_new_questions} interview questions, no more, no less.
     2. Each question should simulate a real interview:
        - Start with easier questions, gradually increasing difficulty.
        - Include conceptual, coding, and scenario-based questions relevant to the context.
@@ -172,12 +215,14 @@ def generate_questions_from_pdf(chunks_data: list[dict], structured_data: list[d
                 "ideal_answer": q.get("ideal_answer", None),
                 "key_points": q.get("key_points", []),
             })
+            
+    final_questions = reused_questions + questions
 
     # Ensure exactly 10 questions
-    while len(questions) < 10:
-        questions.append({
+    while len(final_questions) < 10:
+        final_questions.append({
             "id": str(uuid.uuid4()),
-            "question": f"Placeholder question {len(questions)+1} based on PDF content",
+            "question": f"Placeholder question {len(final_questions)+1} based on PDF content",
             "difficulty": "medium",
             "topic": "general",
             "type": "pdf",
@@ -185,7 +230,6 @@ def generate_questions_from_pdf(chunks_data: list[dict], structured_data: list[d
             "key_points": [],
         })
 
-    if len(questions) > 10:
-        questions = questions[:10]
+    final_questions = final_questions[:10]
 
-    return questions
+    return final_questions

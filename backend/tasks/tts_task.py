@@ -1,8 +1,8 @@
+# backend/tasks/tts_task.py
 from kokoro_local import tts_to_wav
 from services.storage import cache_audio
 import redis
 import os
-print("CWD:", os.getcwd())
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_conn = redis.Redis.from_url(REDIS_URL)

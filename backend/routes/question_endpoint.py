@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
 from typing import List
-from datetime import datetime
 from supabase_client import supabase  
 from question_generation.generate_questions import generate_questions, generate_questions_from_pdf
 
@@ -14,6 +13,7 @@ class QuestionRequest(BaseModel):
     role: str
     techstack: List[str]
     type: str  
+    attemptId: str
 
 @router.post("/manual-questions")
 async def create_questions(req: QuestionRequest = Body(...)):
@@ -21,11 +21,20 @@ async def create_questions(req: QuestionRequest = Body(...)):
         raise HTTPException(status_code=400, detail="Techstack is required")
 
     try:
-        questions =  generate_questions(req.role, req.techstack, req.type)
+        attempt_insert = supabase.table("interview_attempts").insert({
+            "user_id": req.userId,
+            "interview_id": req.interviewId,
+            "attempt_id": req.attemptId
+        }).execute()
+
+        if not attempt_insert.data:
+                raise HTTPException(status_code=500, detail="Failed to create attempt record")
+
+        questions =  generate_questions(req.role, req.techstack, req.type, req.userId, req.interviewId)
 
         if not questions:
             raise HTTPException(status_code=500, detail="No questions generated")
-
+        
         # Supabase insert
         records = [{
             "id": q["id"],
@@ -37,11 +46,13 @@ async def create_questions(req: QuestionRequest = Body(...)):
             "type": q["type"],
             "ideal_answer": q["ideal_answer"],
             "key_points": q["key_points"],
+            "attempt_id": req.attemptId
         } for q in questions]
 
 
         try:
             res = supabase.table("questions").insert(records).execute()
+            
             if res.data:
                 print("Insert successful:", res.data)
             else:
@@ -53,7 +64,8 @@ async def create_questions(req: QuestionRequest = Body(...)):
         return {
             "status": "success",
             "questions_created": len(records),
-            "interview_id": req.interviewId
+            "interview_id": req.interviewId,
+            "questions": questions,
         }
 
     except Exception as e:
@@ -65,6 +77,7 @@ async def create_questions(req: QuestionRequest = Body(...)):
 class PDFQuestionRequest(BaseModel):
     userId: str
     interviewId: str
+    attemptId: str
 
 @router.post("/pdf-questions")
 async def create_pdf_questions(req: PDFQuestionRequest = Body(...)):
@@ -82,17 +95,27 @@ async def create_pdf_questions(req: PDFQuestionRequest = Body(...)):
 
         if not struct_data:
             raise HTTPException(status_code=404, detail="No structured data found for this interview")
+        
+        attempt_insert = supabase.table("interview_attempts").insert({
+            "user_id": req.userId,
+            "interview_id": req.interviewId,
+            "attempt_id": req.attemptId
+        }).execute()
+
+        if not attempt_insert.data:
+                raise HTTPException(status_code=500, detail="Failed to create attempt record")
+        
 
         # 3. Generate questions from both chunks and structured data
-        # Your function should handle: chunk_text, topics, key_points
-        questions = generate_questions_from_pdf(chunks_data, struct_data)
+        questions = generate_questions_from_pdf(chunks_data, struct_data,req.userId, req.interviewId)
 
         if not questions:
             raise HTTPException(status_code=500, detail="No questions generated from PDF/structured data")
+        
 
         # 4. Prepare records for insertion into "questions" table
         records = [{
-            "id": q["id"],  # make sure your generator returns UUIDs or generate here
+            "id": q["id"], 
             "interview_id": req.interviewId,
             "user_id": req.userId,
             "question": q["question"],
@@ -101,6 +124,7 @@ async def create_pdf_questions(req: PDFQuestionRequest = Body(...)):
             "topic": q.get("topic", ""),
             "ideal_answer": q.get("ideal_answer", ""),
             "key_points": q.get("key_points", []),
+            "attempt_id": req.attemptId
         } for q in questions]
 
         # 5. Insert into Supabase
@@ -117,7 +141,8 @@ async def create_pdf_questions(req: PDFQuestionRequest = Body(...)):
         return {
             "status": "success",
             "questions_created": len(records),
-            "interview_id": req.interviewId
+            "interview_id": req.interviewId,
+            "questions": questions
         }
 
     except Exception as e:

@@ -2,23 +2,18 @@ import os
 import tempfile
 from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response
 from typing import Dict
 import asyncio
-from tasks.tts_task import generate_audio_task
 import redis
 import rq
 from uuid import UUID
 import uuid
 from pydantic import BaseModel
-from datetime import datetime
-import json
+from services.storage import  get_cached_audio,create_attempt_record_in_db, update_attempt_status_to_completed,mark_question_as_answered
+from services.scoring_service import run_full_scoring
 
 
-# Import our new modules
-from services.storage import cache_audio, get_cached_audio, save_transcript_to_db, create_attempt_record_in_db, update_attempt_status_to_completed
-from services.WhisperModel import transcribe_file
-from kokoro_local import tts_to_wav 
 
 
 router = APIRouter()
@@ -45,6 +40,7 @@ class StartAttemptRequest(BaseModel):
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_conn = redis.Redis.from_url(REDIS_URL)
 tts_queue = rq.Queue("tts_queue", connection=redis_conn)
+whisper_queue = rq.Queue("whisper_queue", connection=redis_conn)
 
 
 # --- Upload & Transcribe Endpoint ---
@@ -54,51 +50,85 @@ def save_answer(
     questionId: str = Form(...),
     interviewId: str = Form(...),
     userId: Optional[str] = Form(None),
-    attemptId: str= Form(...)
+    attemptId: str = Form(...)
 ):
     temp_path = None
     try:
+        # Save uploaded audio to a temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
             tmp.write(file.file.read())
             temp_path = tmp.name
-        
-        print(f"[AI] Transcribing...")
-        transcript = transcribe_file(temp_path)
-        print(f"[AI] Transcript: {transcript[:30]}...")
 
-        save_transcript_to_db(interviewId, questionId, transcript,userId,attemptId)
         
-        return {"status": "success", "transcript": transcript}
+        mark_question_as_answered(attemptId, questionId, interviewId, userId)
+
+        print(f"[AI] Queuing Whisper transcription for question {questionId}...")
+
+        # ---------------------------------------------------
+        # 🚀 ENQUEUE WHISPER TRANSCRIPTION TO RQ WORKER
+        # ---------------------------------------------------
+        whisper_queue.enqueue(
+            "tasks.whisper_task.whisper_transcribe_task",
+            temp_path,      
+            interviewId,
+            questionId,
+            userId,
+            attemptId
+        )
+
+        # DO NOT delete the file here — worker needs it.
+        print("[AI] Whisper task queued successfully.")
+
+        return {
+            "status": "queued",
+            "message": "Transcription started...",
+            "questionId": questionId,
+            "attemptId": attemptId
+        }
 
     except Exception as e:
         print(f"[Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
 
 
 #--- Start Attempt Endpoint ---
 @router.post("/start_attempt")
 async def start_attempt(request: StartAttemptRequest):
+    print("\n==============================")
+    print("📌 START_ATTEMPT REQUEST RECEIVED")
+    print("==============================")
+    print(f"➡ attemptId (from frontend): {request.attemptId}")
+    print(f"➡ interviewId: {request.interviewId}")
+    print(f"➡ userId: {request.userId}")
+
     try:
-        """Creates a new attempt record in the database."""
         try:
+            print("📌 Calling create_attempt_record_in_db()...")
             create_attempt_record_in_db(
                 attempt_id=request.attemptId,
                 interview_id=request.interviewId,
                 user_id=request.userId
             )
-        except Exception as e:
-            print(f"Error creating attempt record: {e}")
-            raise HTTPException(status_code=500, detail="Could not create attempt record in the database.")
+            print("✅ Attempt record created successfully.")
 
-        return {"message": "Attempt record initialized successfully", "attemptId": request.attemptId}
+        except Exception as e:
+            print("❌ ERROR inside create_attempt_record_in_db")
+            print("🧨 Exception Trace Below:")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"DB Insert Error: {str(e)}")
+
+        print("📤 Sending response back to frontend...")
+        return {
+            "message": "Attempt record initialized successfully",
+            "attemptId": request.attemptId
+        }
 
     except Exception as e:
-        print(f"Database error on start_attempt: {e}")
-        raise HTTPException(status_code=500, detail="Could not establish session in the database.")
+        print("❌ OUTER ERROR: Something went wrong in start_attempt")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"start_attempt failed: {str(e)}")
 
 
 
@@ -128,7 +158,7 @@ async def websocket_endpoint(ws: WebSocket):
                         print(f"[WS] Acquired lock for {i_id}:{q_id}. Enqueuing job.")
                         try:
                             if not get_cached_audio(i_id, q_id):
-                                tts_queue.enqueue(generate_audio_task, text, i_id, q_id)
+                                tts_queue.enqueue("tasks.tts_task.generate_audio_task", text, i_id, q_id)
                         finally:
                             if redis_conn.get(lock_key) == lock_value.encode('utf-8'):
                                 redis_conn.delete(lock_key)
@@ -173,36 +203,69 @@ def get_audio_endpoint(interviewId: str, questionId: str):
 # --- Complete Attempt Endpoint ---
 @router.post("/complete_attempt")
 async def complete_interview_attempt(request: CompleteAttemptRequest):
-    """
-    Finalizes the interview attempt, updates status, and initiates LLM scoring.
-    """
-    attempt_id = request.attemptId
-    interview_id = request.interviewId
 
-    print(f"--- Finalizing Attempt: {attempt_id} for Interview: {interview_id} ---")
-    
+    print("\n==============================")
+    print("📩 Incoming /complete_attempt request")
+    print("==============================")
+
+    print("🆔 attemptId:", request.attemptId)
+    print("🗂 interviewId:", request.interviewId)
+    print("👤 userId:", request.userId)
+
+    attempt_id = request.attemptId
+
+    print(f"\n--- Finalizing Attempt: {attempt_id} ---")
+
     try:
-        await asyncio.to_thread(
-            update_attempt_status_to_completed,
-            attempt_id=attempt_id 
-        )
-        print(f"DB update complete for attempt {attempt_id}.")
- 
-        llm_results_json = {"overall_score": 85, "summary": "Great clarity and structure."} 
+        print("\n🔧 Step 1: Updating attempt status to COMPLETED...")
+
+        await asyncio.to_thread(update_attempt_status_to_completed, attempt_id)
+
+        print("✅ Attempt status updated.\n")
         
+        
+        # -----------------------------
+        # 2️⃣ Wait for required transcripts
+        # -----------------------------
+        print("⏳ Step 2: Waiting for required Whisper transcripts...")
+        from services.wait_utils import wait_for_required_transcripts
+        await wait_for_required_transcripts(attempt_id, timeout=60)
+        print("✅ Transcript wait finished (or timeout reached).")
+
+        
+        print("🔍 Step 2: Running full scoring pipeline...")
+        print("⏳ Calling run_full_scoring() ...")
+
+        llm_results = await run_full_scoring(
+            attempt_id=request.attemptId,
+            user_id=request.userId,
+            interview_id=request.interviewId
+        )
+
+        print("\n🎯 Scoring completed successfully!")
+        print("📊 Overall:", llm_results["overall_score"])
+        print("📝 Feedback length:", len(llm_results["feedback"]))
+        print("🧩 Questions scored:", len(llm_results["questions"]))
+
     except Exception as e:
-        print(f"Failed to complete attempt {attempt_id}: {e}")
+        import traceback
+        print("\n❌ ERROR inside complete_attempt:")
+        print("Error message:", e)
+        print("\n--- TRACEBACK ---")
+        print(traceback.format_exc())
+        print("--- END TRACEBACK ---\n")
+
         raise HTTPException(
-            status_code=500, 
-            detail=f"Failed to finalize attempt or run scoring: {e}"
+            status_code=500,
+            detail=f"Failed to finalize attempt: {e}"
         )
-        
+
+    print("\n🚀 Returning final response...\n")
+
     return {
-        "message": "Interview finalized and scoring completed.",
+        "message": "Scoring Complete",
         "attemptId": attempt_id,
-        "status": "Scoring Complete",
-        "llm_summary": llm_results_json.get("overall_score"), 
-        "detailed_results": llm_results_json
+        "overall_score": llm_results["overall_score"],
+        "feedback": llm_results["feedback"],
+        "questions": llm_results["questions"]
     }
-    
-    

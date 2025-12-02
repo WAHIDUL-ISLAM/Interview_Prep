@@ -2,15 +2,13 @@ import re
 from typing import List
 import fitz
 import numpy as np
+from sklearn.cluster import AgglomerativeClustering
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 
-# Load embedding model once per worker
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def parse_pdf_to_text(file_path: str) -> str:
-    """Extract full text from PDF."""
     text = ""
     with fitz.open(file_path) as pdf:
         for page in pdf:
@@ -18,15 +16,13 @@ def parse_pdf_to_text(file_path: str) -> str:
     return text.strip()
 
 
-def parse_pdf_to_chunks(
+def parse_pdf_to_chunks_agglomerative(
     file_path: str,
     chunk_size: int = 2000,
-    max_merged_size: int = 8000,
-    similarity_threshold: float = 0.7
+    max_cluster_size: int = 8000,
+    distance_threshold: float = 0.35, 
 ) -> List[str]:
-    """
-    Parse PDF into semantic-aware chunks using greedy similarity merging.
-    """
+
     full_text = parse_pdf_to_text(file_path)
     if not full_text:
         return []
@@ -36,48 +32,52 @@ def parse_pdf_to_chunks(
     if not paragraphs:
         return []
 
-    # Step 2: create initial 2k-character chunks
-    chunks = []
+    # Step 2: initial ~2k character chunks
+    rough_chunks = []
     current_chunk = ""
+
     for para in paragraphs:
         if len(current_chunk) + len(para) > chunk_size:
-            chunks.append(current_chunk.strip())
+            rough_chunks.append(current_chunk.strip())
             current_chunk = para + "\n"
         else:
             current_chunk += para + "\n"
+
     if current_chunk.strip():
-        chunks.append(current_chunk.strip())
+        rough_chunks.append(current_chunk.strip())
 
-    if len(chunks) == 1:
-        return chunks  # only one chunk, nothing to merge
+    if len(rough_chunks) == 1:
+        return rough_chunks
 
-    # Step 3: compute embeddings
-    chunk_embeddings = embed_model.encode(chunks)
+    # Step 3: embed all chunks
+    embeddings = embed_model.encode(rough_chunks)
 
-    # Step 4: greedy similarity merging
-    merged_flags = [False] * len(chunks)
-    merged_chunks = []
+    # Step 4: Agglomerative clustering
+    clustering = AgglomerativeClustering(
+        affinity="cosine",
+        linkage="average",
+        distance_threshold=distance_threshold,
+        n_clusters=None
+    )
 
-    sim_matrix = cosine_similarity(chunk_embeddings)
+    labels = clustering.fit_predict(embeddings)
 
-    for i in range(len(chunks)):
-        if merged_flags[i]:
-            continue
-        merge_group = [i]
-        for j in range(i + 1, len(chunks)):
-            if merged_flags[j]:
-                continue
-            if sim_matrix[i][j] >= similarity_threshold:
-                merge_group.append(j)
-                merged_flags[j] = True
+    # Step 5: merge chunks per cluster
+    cluster_map = {}
+    for idx, label in enumerate(labels):
+        cluster_map.setdefault(label, []).append(rough_chunks[idx])
 
-        merged_text = "\n".join(chunks[k] for k in merge_group)
+    final_chunks = []
 
-        # Step 5: enforce max_merged_size
-        if len(merged_text) > max_merged_size:
-            for start in range(0, len(merged_text), max_merged_size):
-                merged_chunks.append(merged_text[start:start + max_merged_size])
+    for label, cluster_chunks in cluster_map.items():
+        merged = "\n".join(cluster_chunks)
+
+        # enforce max_cluster_size
+        if len(merged) > max_cluster_size:
+            # split extremely large clusters
+            for start in range(0, len(merged), max_cluster_size):
+                final_chunks.append(merged[start:start + max_cluster_size])
         else:
-            merged_chunks.append(merged_text)
+            final_chunks.append(merged)
 
-    return merged_chunks
+    return final_chunks

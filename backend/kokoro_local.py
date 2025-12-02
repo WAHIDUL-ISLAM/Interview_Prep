@@ -1,4 +1,4 @@
-# kokoro_tts.py
+# backend/kokoro_local.py
 
 import torch
 import numpy as np

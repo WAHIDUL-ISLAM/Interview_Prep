@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 import redis
 import rq
 from urllib.parse import unquote
-from tasks.pdf_task import pdf_parsing_task
+
 
 router = APIRouter()
 
@@ -50,7 +50,8 @@ async def upload_pdf(
         print(f"[DEBUG] Redis key for tracking: {redis_key}")
 
         # Enqueue background task
-        pdf_queue.enqueue(pdf_parsing_task, temp_file.name, redis_key, userId, pdf_upload_id, interviewId)
+        pdf_queue.enqueue("tasks.pdf_task.pdf_parsing_task",temp_file.name, redis_key, userId, pdf_upload_id, interviewId)
+
         print(f"[DEBUG] Enqueued pdf_parsing_task in pdf_queue")
 
         # Return WebSocket URL for progress tracking
